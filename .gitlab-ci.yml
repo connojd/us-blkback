@@ -1,0 +1,27 @@
+variables:
+  PROJECT_NAMESPACE: gitlab.ainfosec.com/beam/winpv/win-blkback
+  PROJECT_NAME: win-blkback
+
+stages:
+  - qa-check
+  - build
+
+build:
+  image:  registry.gitlab.ainfosec.com/beam/winpv/win-blkback
+  dependencies: []
+  stage: build
+#  before_script:
+
+  script:
+    - mkdir build
+    - cd build
+    - cmake ..
+    - make
+    - ./blk-back >> unit-test-log 2>> unit-test-log
+  artifacts:
+    paths:
+      - build/unit-test-log
+    expire_in: 60 day
+
+  tags:
+    - docker
