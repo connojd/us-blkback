@@ -26,48 +26,55 @@
 #include <xen/be/BackendBase.hpp>
 #include <xen/be/FrontendHandlerBase.hpp>
 #include <xen/be/RingBufferBase.hpp>
+#include <xen/be/XenGnttab.hpp>
 #include "DiskImage.h"
 
-//! [BlkOutRingBuffer]
-class BlkOutRingBuffer : public XenBackend::RingBufferOutBase
-								   <xenblk_event_page, xenblk_evt>
+#define XENBLK_IN_RING_OFFS 0
+#define XENBLK_IN_RING_SIZE 4096
+
+//! [BlkCmdRingBuffer]
+class BlkCmdRingBuffer : public XenBackend::RingBufferInBase<blkif_back_ring_t, blkif_sring_t,
+							     blkif_request_t, blkif_response_t>
 {
 public:
 
-	BlkOutRingBuffer(domid_t domId, evtchn_port_t port, grant_ref_t ref) :
-		XenBackend::RingBufferOutBase<xenblk_event_page, xenblk_evt>
-			(domId, port, ref, XENBLK_IN_RING_OFFS, XENBLK_IN_RING_SIZE) {}
-
-};
-//! [BlkOutRingBuffer]
-
-//! [BlkInRingBuffer]
-class BlkInRingBuffer : public XenBackend::RingBufferInBase
-								  <blkif_back_ring_t, blkif_srint_t,
-								   blkif_request_t, blkif_response_t>
-{
-public:
-
-	BlkInRingBuffer(domid_t domId, evtchn_port_t port, grant_ref_t ref) :
-		XenBackend::RingBufferInBase<blkif_back_ring_t, blkif_back_ring_t,
-									 blkif_request_t, blkif_response_t>
-									(domId, port, ref),
-		mLog("InRingBuffer"),
-        mDomId(domId)
+	BlkCmdRingBuffer(domid_t domId,
+			 evtchn_port_t port,
+			 grant_ref_t ref,
+			 std::shared_ptr<DiskImage> diskImage) :
+	  XenBackend::RingBufferInBase<blkif_back_ring_t,
+				       blkif_sring_t,
+				       blkif_request_t,
+				       blkif_response_t>(domId, port, ref),
+	  mLog("InRingBuffer"),
+	  mDomId(domId),
+	  mImage(diskImage)
 	{
 		LOG(mLog, DEBUG) << "Create out ring buffer, dom id: " << domId;
 	}
 
 
+  ~BlkCmdRingBuffer() {
+  }
+  
 private:
 
+
+        int processSegments(const struct blkif_request_segment *segments,
+			    uint32_t nr_segments,
+			    blkif_sector_t sector_number,
+			    bool write);
+        int performRead(const blkif_request_t &req);
+        int performWrite(const blkif_request_t &req);
+        int handleIndirectRequest(const blkif_request_indirect_t *indirect);
 	// Override receiving requests
 	virtual void processRequest(const blkif_request& req) override;
 
 	// XenBackend::Log can be used by backend
 	XenBackend::Log mLog;
-    DiskImage &mImage;
-    domid_t mDomId;
+  
+        domid_t mDomId;
+        std::shared_ptr<DiskImage> mImage{nullptr};
 };
 //! [BlkInRingBuffer]
 
@@ -75,15 +82,18 @@ private:
 class BlkFrontendHandler : public XenBackend::FrontendHandlerBase
 {
 public:
-
-	BlkFrontendHandler(const std::string& devName, domid_t feDomId) :
-		FrontendHandlerBase("FrontendHandler", "blk_dev", 0, feDomId),
-		mLog("FrontendHandler")
-	{
-		LOG(mLog, DEBUG) << "Create blk frontend handler, dom id: "
-						 << feDomId;
-	}
-
+  BlkFrontendHandler(const std::string& devName, 
+		     domid_t feDomId, 
+		     uint16_t devId) : FrontendHandlerBase("FrontendHandler",
+							   "vbd",
+							   feDomId, 
+							   devId),
+				       mLog("FrontendHandler")
+  {
+    LOG(mLog, DEBUG) << "Create blk frontend handler, dom id: "
+		     << feDomId;
+  }
+  
 private:
 
 	// Override onBind method
@@ -96,9 +106,10 @@ private:
 	XenBackend::Log mLog;
 
 	// Store out ring buffer
-	std::shared_ptr<BlkOutRingBuffer> mOutRingBuffer;
+        std::shared_ptr<BlkCmdRingBuffer> mCmdRingBuffer{nullptr};
 
-    std::list<DiskImage> image;
+        // The backing store for this device
+        std::shared_ptr<DiskImage> mImage{nullptr};
 };
 //! [BlkFrontend]
 
@@ -108,10 +119,10 @@ class BlkBackend : public XenBackend::BackendBase
 public:
 
 	BlkBackend() :
-		BackendBase("BlkBackend", "blk_dev"),
+		BackendBase("BlkBackend", "vbd"),
 		mLog("BlkBackend")
 	{
-		LOG(mLog, DEBUG) << "Create blk backend";
+		LOG(mLog, DEBUG) << "Create vbd backend";
 	}
 
 private:
