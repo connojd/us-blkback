@@ -1,10 +1,11 @@
 #ifndef DISK_IMAGE__H
 #define DISK_IMAGE__H
-
+#include <memory>
 #include <fstream>
 #include <vector>
 #include <string>
 #include <iostream>
+#include "MemoryMappedFile.h"
 
 extern "C" {
 #include <xen/io/blkif.h>
@@ -26,16 +27,16 @@ public:
 
     int8_t discard(blkif_sector_t sector_number, uint64_t count);
 
-  
     void flushBackingFile();
-  
+
     uint32_t getSectorSize() { return mSectorSize; }
     uint32_t getSectorCount() { return mSectorCount; }
-  
 private:
     std::fstream mBackingFile;
     blkif_sector_t mSectorSize{512};
     blkif_sector_t mSectorCount{0};
+
+    std::unique_ptr<MemoryMappedFile> mFile{nullptr};
 };
 
 #endif // DISK_IMAGE__H

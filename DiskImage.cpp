@@ -1,10 +1,15 @@
 #include "DiskImage.h"
+#include <cstring>
 
-DiskImage::DiskImage(const std::string &path, blkif_sector_t sector_size) : mBackingFile(path, std::fstream::binary|std::fstream::in|std::fstream::out), mSectorSize(sector_size)
+#ifndef _WIN32
+#define memmapfile UnixMemoryMappedFile
+#else
+#define memmapfile WinMemoryMappedFile
+#endif
+
+DiskImage::DiskImage(const std::string &path, blkif_sector_t sector_size) : mSectorSize(sector_size), mFile(new memmapfile(path))
 {
-    mBackingFile.seekg(0, mBackingFile.end);
-    mSectorCount = mBackingFile.tellg()/mSectorSize;
-    mBackingFile.seekg(0, mBackingFile.beg);
+    mSectorCount = mFile->size()/mSectorSize;
 }
 
 DiskImage::~DiskImage()
@@ -13,14 +18,16 @@ DiskImage::~DiskImage()
 }
 
 int8_t
-DiskImage::createBackingFile(const std::string &path, blkif_sector_t num_sectors, blkif_sector_t sector_size)
+DiskImage::createBackingFile(const std::string &path,
+                             blkif_sector_t num_sectors,
+                             blkif_sector_t sector_size)
 {
     std::vector<char> empty(sector_size, 0);
     std::ofstream ofs(path, std::ios::binary | std::ios::out);
 
     for(uint64_t i = 0; i < num_sectors; i++)
     {
-        if (!ofs.write(&empty[0], empty.size()))
+        if (!ofs.write(empty.data(), empty.size()))
         {
             std::cerr << "problem writing to file" << std::endl;
             return -1;
@@ -33,43 +40,35 @@ DiskImage::createBackingFile(const std::string &path, blkif_sector_t num_sectors
 int8_t
 DiskImage::readSector(blkif_sector_t sector_number, std::vector<char> &sector)
 {
-    /*
     if(sector.size() != mSectorSize) {
         return -1;
     }
-    */
+
     if (sector_number >= mSectorCount) {
         return -1;
     }
- 
-    mBackingFile.seekg(mSectorSize*sector_number, mBackingFile.beg);
-    mBackingFile.read(sector.data(), sector.size());
-    if ((mBackingFile.rdstate() & std::ifstream::failbit)){
-        return -1;
-    }
-    mBackingFile.sync();
-    
+
+    memcpy(sector.data(), mFile->get() + uintptr_t(sector_number*mSectorSize), sector.size());
+
     return 0;
 }
 
 int8_t
 DiskImage::writeSector(blkif_sector_t sector_number, const std::vector<char> &sector)
 {
+    if(sector.size() != mSectorSize) {
+        return -1;
+    }
+
     if (sector_number >= mSectorCount) {
         return -1;
     }
 
-    mBackingFile.seekp(mSectorSize*sector_number);
-    mBackingFile.write(sector.data(), sector.size());
-    if ((mBackingFile.rdstate() & std::ifstream::failbit)){
-        return -1;
-    }
-    mBackingFile.flush();
-    
+    memcpy(mFile->get() + (uintptr_t)(sector_number*mSectorSize), sector.data(), sector.size());
+    mFile->flush();
+
     return 0;
 }
-
-#include <cstring>
 
 int8_t
 DiskImage::readSector(blkif_sector_t sector_number, char *buffer, uint32_t size)
@@ -77,13 +76,10 @@ DiskImage::readSector(blkif_sector_t sector_number, char *buffer, uint32_t size)
     if (sector_number >= mSectorCount) {
         return -1;
     }
-    
-    mBackingFile.seekg(mSectorSize*sector_number, mBackingFile.beg);
-    mBackingFile.read(buffer, size);
-    if ((mBackingFile.rdstate() & std::ifstream::failbit)){
-        return -1;
-    }
-    mBackingFile.sync();
+
+    memcpy(buffer,
+           mFile->get() + (uintptr_t)(sector_number*mSectorSize),
+           size);
 
     return 0;
 }
@@ -94,15 +90,11 @@ DiskImage::writeSector(blkif_sector_t sector_number, char *buffer, uint32_t size
     if (sector_number >= mSectorCount) {
         return 0;
     }
-    
-    mBackingFile.seekp(mSectorSize*sector_number, mBackingFile.beg);
-    mBackingFile.write(buffer, size);
-    if ((mBackingFile.rdstate() & std::ifstream::failbit)){
-        exit(-1);
-        return -1;
-    }
-    mBackingFile.flush();
-    
+
+    memcpy(mFile->get() + uintptr_t(sector_number*mSectorSize),
+           buffer,
+           size);
+
     return 0;
 }
 
@@ -113,25 +105,17 @@ DiskImage::discard(blkif_sector_t sector_number, uint64_t count)
         return -1;
     }
 
-    const char zero = 0x00;
-    
-    mBackingFile.seekp(mSectorSize*sector_number);
-    
-    for(uint64_t i = 0; i < count*mSectorSize; i++) {
-        mBackingFile.put(zero);
-    }
-    
-    if ((mBackingFile.rdstate() & std::ifstream::failbit)){
-        return -1;
-    }
+    memset(mFile->get() + uintptr_t(sector_number*mSectorSize),
+           0x00,
+           count*mSectorSize);
+
     return 0;
 }
 
 void
 DiskImage::flushBackingFile()
 {
-    mBackingFile.sync();
-    mBackingFile.flush();
+    mFile->flush();
 }
 
 /*
