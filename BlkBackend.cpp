@@ -110,7 +110,6 @@ int BlkCmdRingBuffer::performRead(const blkif_request_t &req)
     }
     
     int rc = processSegments(req.seg, req.nr_segments, req.sector_number, false);
-    LOG(mLog, INFO) << "Read: " << req.sector_number;
     if(rc) {
         LOG(mLog, INFO) << "Read failed: " << req.sector_number;
         return BLKIF_RSP_ERROR;
@@ -122,7 +121,6 @@ int BlkCmdRingBuffer::performRead(const blkif_request_t &req)
 int BlkCmdRingBuffer::performWrite(const blkif_request_t &req)
 {
     int rc = processSegments(req.seg, req.nr_segments, req.sector_number, true);
-
     if(rc) {
         LOG(mLog, INFO) << "Write failed: " << req.sector_number;
         return BLKIF_RSP_ERROR;
@@ -184,7 +182,6 @@ void BlkCmdRingBuffer::processRequest(const blkif_request& req)
     }
     case BLKIF_OP_INDIRECT:
     {
-//        LOG(mLog, INFO) << "BLKIF_OP_INDIRECT: " << req.sector_number;
         const blkif_request_indirect_t *indirect =
             reinterpret_cast<const blkif_request_indirect_t *>(&req);
         rsp.status = handleIndirectRequest(indirect);
