@@ -20,14 +20,13 @@ public:
 WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
     {
         LARGE_INTEGER size;
-        m_file = CreateFileA(m_path.c_str(),
+		SetCurrentDirectory("C:\\");
+        m_file = CreateFileA(path.c_str(),
                              (GENERIC_READ | GENERIC_WRITE),
                              0,
                              nullptr,
                              OPEN_EXISTING,
-                             (FILE_ATTRIBUTE_NORMAL|
-                              FILE_FLAG_RANDOM_ACCESS|
-                              FILE_FLAG_WRITE_THROUGH),
+                             (FILE_ATTRIBUTE_NORMAL),
                              nullptr);
 
         if(m_file == INVALID_HANDLE_VALUE) {
@@ -64,6 +63,8 @@ WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
             DWORD err = GetLastError();
             throw;
         }
+
+		FlushViewOfFile(m_ptr, m_size);
     }
 
     ~WinMemoryMappedFile()

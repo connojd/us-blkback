@@ -10,6 +10,7 @@
 extern "C" {
 #include <xen/io/blkif.h>
 };
+
 class DiskImage {
 public:
     DiskImage(const std::string &path, blkif_sector_t sector_size = 512);

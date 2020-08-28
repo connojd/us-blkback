@@ -77,6 +77,8 @@ DiskImage::readSector(blkif_sector_t sector_number, char *buffer, uint32_t size)
         return -1;
     }
 
+	mFile->flush();
+
     memcpy(buffer,
            mFile->get() + (uintptr_t)(sector_number*mSectorSize),
            size);

@@ -22,7 +22,9 @@
 #define BLKBACKEND_HPP_
 
 #include <memory>
-
+#define _WINDLL 1
+#define __x86_64__ 1
+//#define __XEN_TOOLS__ 1
 #include <xen/be/BackendBase.hpp>
 #include <xen/be/FrontendHandlerBase.hpp>
 #include <xen/be/RingBufferBase.hpp>
@@ -50,7 +52,7 @@ public:
 	  mDomId(domId),
 	  mImage(diskImage)
 	{
-		LOG(mLog, DEBUG) << "Create out ring buffer, dom id: " << domId;
+		LOG(mLog, INFO) << "Create out ring buffer, dom id: " << domId;
 	}
 
 
@@ -106,10 +108,10 @@ private:
 	XenBackend::Log mLog;
 
 	// Store out ring buffer
-        std::shared_ptr<BlkCmdRingBuffer> mCmdRingBuffer{nullptr};
+    std::shared_ptr<BlkCmdRingBuffer> mCmdRingBuffer{nullptr};
 
-        // The backing store for this device
-        std::shared_ptr<DiskImage> mImage{nullptr};
+    // The backing store for this device
+    std::shared_ptr<DiskImage> mImage{nullptr};
 };
 //! [BlkFrontend]
 

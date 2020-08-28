@@ -15,7 +15,6 @@
  *   along with this program; if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
- * Copyright (C) 2016 EPAM Systems Inc.
  */
 
 #include "BlkBackend.hpp"
@@ -67,6 +66,7 @@ gatherIndirectGrantRefs(const blkif_request_indirect_t *req)
     return grefs;
 }
 
+
 int BlkCmdRingBuffer::processSegments(const struct blkif_request_segment *segments,
                                       uint32_t nr_segments,
                                       blkif_sector_t sector_number,
@@ -89,9 +89,13 @@ int BlkCmdRingBuffer::processSegments(const struct blkif_request_segment *segmen
                                          target_buffer,
                                          SECTOR_SIZE);
             } else {
+				memset(target_buffer, 0xAC, SECTOR_SIZE);
+				/*
                 rc = mImage->readSector(target_sector,
                                         target_buffer,
                                         SECTOR_SIZE);
+										*/
+				dump_sector(target_buffer, SECTOR_SIZE);
             }
 
             if(rc) {
@@ -249,7 +253,7 @@ void BlkFrontendHandler::onClosing()
 //! [onNewFrontend]
 void BlkBackend::onNewFrontend(domid_t domId, uint16_t devId)
 {
-    LOG(mLog, DEBUG) << "New frontend, dom id: " << domId;
+    LOG(mLog, INFO) << "New frontend, dom id: " << domId;
 
     // create new blk frontend handler
     addFrontendHandler(FrontendHandlerPtr(new BlkFrontendHandler(getDeviceName(), domId, devId)));
@@ -257,7 +261,9 @@ void BlkBackend::onNewFrontend(domid_t domId, uint16_t devId)
 //! [onNewFrontend]
 
 void waitSignals()
+
 {
+#ifndef _WIN32
     sigset_t set;
     int signal;
 
@@ -267,6 +273,10 @@ void waitSignals()
     sigprocmask(SIG_BLOCK, &set, nullptr);
 
     sigwait(&set,&signal);
+#else
+    HANDLE h = CreateEvent(NULL, FALSE, FALSE, TEXT("STOPTHREAD"));
+    WaitForSingleObject(h, INFINITE);
+#endif
 }
 
 //! [main]
