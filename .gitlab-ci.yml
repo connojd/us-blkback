@@ -1,0 +1,26 @@
+variables:
+  PROJECT_NAMESPACE: gitlab.com/brendank310/us-blkback
+  PROJECT_NAME: win-blkback
+
+stages:
+  - qa-check
+  - build
+
+build:
+  image:  registry.gitlab.com/brendank310/us-blkback
+  dependencies: []
+  stage: build
+#  before_script:
+
+  script:
+    - mkdir build
+    - cd build
+    - cmake ..
+    - make
+  artifacts:
+    paths:
+      - build/unit-test-log
+    expire_in: 60 day
+
+  tags:
+    - docker
