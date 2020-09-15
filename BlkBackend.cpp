@@ -61,8 +61,6 @@ set_affinity(uint64_t core)
 
 #endif
 
-#define SECTOR_SIZE 512
-
 using XenBackend::FrontendHandlerPtr;
 using XenBackend::RingBufferPtr;
 

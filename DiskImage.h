@@ -11,6 +11,8 @@ extern "C" {
 #include <xen/io/blkif.h>
 };
 
+#define SECTOR_SIZE 512
+
 class DiskImage {
 public:
     DiskImage(const std::string &path, blkif_sector_t sector_size = 512);
@@ -34,7 +36,7 @@ public:
     uint32_t getSectorCount() { return mSectorCount; }
 private:
     std::fstream mBackingFile;
-    blkif_sector_t mSectorSize{512};
+    blkif_sector_t mSectorSize{SECTOR_SIZE};
     blkif_sector_t mSectorCount{0};
 
     std::unique_ptr<MemoryMappedFile> mFile{nullptr};
