@@ -47,7 +47,9 @@ public:
 	  XenBackend::RingBufferInBase<blkif_back_ring_t,
 				       blkif_sring_t,
 				       blkif_request_t,
-				       blkif_response_t>(domId, port, ref),
+				       blkif_response_t>(domId, port, ref,
+                                                         __CONST_RING_SIZE(blkif, XC_PAGE_SIZE),
+                                                         XC_PAGE_SIZE),
 	  mLog("InRingBuffer"),
 	  mDomId(domId),
 	  mImage(diskImage)
@@ -56,9 +58,8 @@ public:
 	}
 
 
-  ~BlkCmdRingBuffer() {
-  }
-  
+        ~BlkCmdRingBuffer() = default;
+
 private:
 
 
