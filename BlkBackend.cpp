@@ -18,13 +18,53 @@
  */
 
 #include "BlkBackend.hpp"
-
 #include <csignal>
+#include <cmath>
+#include <cxxopts.hpp>
+
+#ifdef _WIN32
+
+#include <windows.h>
+
+static inline int
+set_affinity(uint64_t core)
+{
+    if (SetProcessAffinityMask(GetCurrentProcess(), 1ULL << core) == 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+#else
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#include <sched.h>
+
+static inline int
+set_affinity(uint64_t core)
+{
+    cpu_set_t  mask;
+
+    CPU_ZERO(&mask);
+    CPU_SET(core, &mask);
+
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+#endif
+
+#define SECTOR_SIZE 512
 
 using XenBackend::FrontendHandlerPtr;
 using XenBackend::RingBufferPtr;
-
-#define SECTOR_SIZE 512
 
 void dump_sector(const void *target, uint64_t sector_size)
 {
@@ -38,7 +78,6 @@ void dump_sector(const void *target, uint64_t sector_size)
     std::cerr << '\n';
 }
 
-#include <cmath>
 
 std::vector<grant_ref_t>
 gatherGrantRefs(const struct blkif_request_segment *segments, uint32_t nr_segments)
@@ -284,6 +323,30 @@ int main(int argc, char *argv[])
 {
     try
     {
+        using namespace cxxopts;
+
+        cxxopts::Options options(argv[0], " - xen blkback in userspace");
+
+        options.add_options()
+        ("h,help", "Print this help menu")
+        ("a,affinity", "The cpu to execute on", cxxopts::value<uint64_t>(), "[cpu #]");
+
+        auto args = options.parse(argc, argv);
+        if (args.count("help")) {
+            std::cout << options.help() << '\n';
+            exit(EXIT_SUCCESS);
+        }
+
+        if (args.count("affinity")) {
+                uint64_t cpu = args["affinity"].as<uint64_t>();
+
+                if (set_affinity(cpu)) {
+                        LOG("Main", ERROR) << "Failed to set affinity to cpu "
+                                           << cpu;
+                        throw;
+                }
+        }
+
         // Create backend
         BlkBackend blkBackend;
         LOG("Main", INFO) << "Starting block backend";

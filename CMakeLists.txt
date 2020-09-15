@@ -6,6 +6,18 @@ if(NOT WITH_WIN)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W3 /D__x86_64__")
+    set(CMAKE_CXX_STANDARD 17)
+    include(FetchContent)
+
+    FetchContent_Declare(
+        cxxopts
+        GIT_REPOSITORY https://github.com/jarro2783/cxxopts.git
+        GIT_TAG v2.2.1
+        GIT_SHALLOW ON
+    )
+
+    FetchContent_MakeAvailable(cxxopts)
+    include_directories(${CMAKE_CURRENT_BINARY_DIR}/_deps/cxxopts-src/include)
 endif()
 
 message(STATUS)
