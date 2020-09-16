@@ -105,35 +105,36 @@ gatherIndirectGrantRefs(const blkif_request_indirect_t *req)
 
 
 int BlkCmdRingBuffer::processSegments(const struct blkif_request_segment *segments,
-                                      uint32_t nr_segments,
-                                      blkif_sector_t sector_number,
-                                      bool write)
+                                      const uint32_t nr_segments,
+                                      const blkif_sector_t sector_number,
+                                      const bool write)
 {
+    constexpr uintptr_t sectors_per_page = XC_PAGE_SIZE / SECTOR_SIZE;
     int rc = 0;
+    blkif_sector_t nr_sectors = 0;
     std::vector<grant_ref_t> grefs = gatherGrantRefs(segments, nr_segments);
     XenBackend::XenGnttabBuffer buffer(mDomId, grefs.data(), grefs.size());
-   
+
     for(uint64_t i = 0; i < nr_segments; i++) {
         for(uint64_t sect_offset = segments[i].first_sect;
             sect_offset <= segments[i].last_sect;
             sect_offset++) {
-            blkif_sector_t target_offset = sect_offset + (i*(XC_PAGE_SIZE/SECTOR_SIZE));
-            blkif_sector_t target_sector = target_offset + sector_number;
-            char *target_buffer = (char *)((uintptr_t)buffer.get() + (uintptr_t)(sect_offset*SECTOR_SIZE));
-            
+
+            blkif_sector_t target_sector = sector_number + nr_sectors;
+            uintptr_t byte_offset = (sect_offset + (i * sectors_per_page)) * SECTOR_SIZE;
+            char *target_buffer = (char *)((uintptr_t)buffer.get() + byte_offset);
+
             if(write) {
                 rc = mImage->writeSector(target_sector,
                                          target_buffer,
                                          SECTOR_SIZE);
             } else {
-				memset(target_buffer, 0xAC, SECTOR_SIZE);
-				/*
                 rc = mImage->readSector(target_sector,
                                         target_buffer,
                                         SECTOR_SIZE);
-										*/
-				dump_sector(target_buffer, SECTOR_SIZE);
             }
+
+            nr_sectors++;
 
             if(rc) {
                 return rc;
@@ -181,6 +182,7 @@ int BlkCmdRingBuffer::handleIndirectRequest(const blkif_request_indirect_t *indi
         LOG(mLog, INFO) << "Indirect op failed: " << indirect->sector_number;
         return BLKIF_RSP_ERROR;
     }
+
     return BLKIF_RSP_OKAY;
 }
 
