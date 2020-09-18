@@ -258,9 +258,16 @@ void BlkFrontendHandler::onBind()
     std::string path = getXenStore().readString(getXsBackendPath() + "/params");
     LOG(mLog, INFO) << "open image file: " << path;
 
+    if (path.front() == '\'' && path.back() == '\'') {
+        if (path.size() > 2) {
+            path = path.substr(1, path.size() - 2);
+        }
+    }
+
     mImage = std::make_shared<DiskImage>(path);
 
     if(!mImage) {
+        LOG(mLog, ERROR) << "Failed to open image file: " << path;
         throw;
     }
 
@@ -325,11 +332,12 @@ int main(int argc, char *argv[])
     {
         using namespace cxxopts;
 
-        cxxopts::Options options(argv[0], " - xen blkback in userspace");
+        cxxopts::Options options("us-blkback - xen blkback in userspace");
 
         options.add_options()
         ("h,help", "Print this help menu")
-        ("a,affinity", "The cpu to execute on", cxxopts::value<uint64_t>(), "[cpu #]");
+        ("a,affinity", "Run on a specific cpu", cxxopts::value<uint64_t>(), "[cpu #]")
+        ("w,wait", "Wait for xeniface driver");
 
         auto args = options.parse(argc, argv);
         if (args.count("help")) {
@@ -347,8 +355,12 @@ int main(int argc, char *argv[])
                 }
         }
 
+        // Spin until XcOpen succeeds. Useful if this program may
+        // be started before the xeniface driver is loaded.
+        bool wait = args.count("wait") != 0;
+
         // Create backend
-        BlkBackend blkBackend;
+        BlkBackend blkBackend(wait);
         LOG("Main", INFO) << "Starting block backend";
         blkBackend.start();
 

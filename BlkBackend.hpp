@@ -121,8 +121,8 @@ class BlkBackend : public XenBackend::BackendBase
 {
 public:
 
-	BlkBackend() :
-		BackendBase("BlkBackend", "vbd"),
+	BlkBackend(bool wait = false) :
+		BackendBase("BlkBackend", "vbd", wait),
 		mLog("BlkBackend")
 	{
 		LOG(mLog, DEBUG) << "Create vbd backend";
