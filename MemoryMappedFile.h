@@ -8,19 +8,21 @@ public:
 
     virtual char *get() = 0;
     virtual void flush() = 0;
-    virtual uint64_t size() = 0;
+    virtual uint64_t size() const = 0;
 };
 
 #ifdef _WIN32
 
 #include <Windows.h>
 
-class WinMemoryMappedFile : public MemoryMappedFile {
+class WinMemoryMappedFile final : public MemoryMappedFile
+{
 public:
-WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
+
+    WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
     {
         LARGE_INTEGER size;
-		SetCurrentDirectory("C:\\");
+
         m_file = CreateFileA(path.c_str(),
                              (GENERIC_READ | GENERIC_WRITE),
                              0,
@@ -29,12 +31,12 @@ WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
                              (FILE_ATTRIBUTE_NORMAL),
                              nullptr);
 
-        if(m_file == INVALID_HANDLE_VALUE) {
+        if (m_file == INVALID_HANDLE_VALUE) {
             DWORD err = GetLastError();
             throw;
         }
 
-        if(!GetFileSizeEx(m_file, &size)) {
+        if (!GetFileSizeEx(m_file, &size)) {
             DWORD err = GetLastError();
             throw;
         }
@@ -48,7 +50,7 @@ WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
             size.u.LowPart,
             nullptr);
 
-        if(!m_file_view) {
+        if (!m_file_view) {
             DWORD err = GetLastError();
             throw;
         }
@@ -59,12 +61,13 @@ WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
             0,
             0,
             m_size);
-        if(!m_ptr) {
+
+        if (!m_ptr) {
             DWORD err = GetLastError();
             throw;
         }
 
-		FlushViewOfFile(m_ptr, m_size);
+        FlushViewOfFile(m_ptr, m_size);
     }
 
     ~WinMemoryMappedFile()
@@ -83,14 +86,16 @@ WinMemoryMappedFile(const std::string &path) : MemoryMappedFile(path)
         m_file = nullptr;
     }
 
-    virtual char *get() { return (char *)m_ptr; }
-    virtual void flush()
+    void flush() override
     {
         FlushViewOfFile(m_ptr, m_size);
     }
-    virtual uint64_t size() { return m_size; }
+
+    char *get() override { return (char *)m_ptr; }
+    uint64_t size() const override { return m_size; }
 
 private:
+
     HANDLE m_file;
     HANDLE m_file_view;
     uint64_t m_size{0};
