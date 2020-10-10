@@ -31,8 +31,54 @@
 #include <xen/be/XenGnttab.hpp>
 #include "DiskImage.h"
 
-#define XENBLK_IN_RING_OFFS 0
-#define XENBLK_IN_RING_SIZE 4096
+static constexpr inline uint64_t minimum(uint64_t left, uint64_t right) noexcept
+{
+    return (left < right) ? left : right;
+}
+
+static constexpr inline uint64_t div_round_up(uint64_t n, uint64_t d) noexcept
+{
+    return (n + d - 1U) / d;
+}
+
+struct GntPage {
+    void *mAddr{nullptr};
+    grant_ref_t mGref{0};
+
+    GntPage(grant_ref_t gref) noexcept :
+        mAddr{nullptr},
+        mGref{gref}
+    { }
+
+    void *map(const domid_t domid)
+    {
+        constexpr int prot = PROT_READ | PROT_WRITE;
+        constexpr uint32_t count = 1U;
+
+        mAddr = xengnttab_map_domain_grant_refs(nullptr,
+                                                count,
+                                                domid,
+                                                &mGref,
+                                                prot);
+        return mAddr;
+    }
+
+    void unmap()
+    {
+        xengnttab_unmap(nullptr, mAddr, 1);
+    }
+
+    grant_ref_t gref() const noexcept
+    {
+        return mGref;
+    }
+
+    void *addr() noexcept
+    {
+        return mAddr;
+    }
+};
+
 
 //! [BlkCmdRingBuffer]
 class BlkCmdRingBuffer : public XenBackend::RingBufferInBase<blkif_back_ring_t, blkif_sring_t,
@@ -54,30 +100,46 @@ public:
 	  mDomId(domId),
 	  mImage(diskImage)
 	{
-		LOG(mLog, INFO) << "Create out ring buffer, dom id: " << domId;
+		LOG(mLog, DEBUG) << "Created blkif ring: frontend: " << domId
+                                 << ", ring size: "
+                                 << __CONST_RING_SIZE(blkif, XC_PAGE_SIZE);
 	}
 
-
-        ~BlkCmdRingBuffer() = default;
+        ~BlkCmdRingBuffer()
+        {
+            this->freeGrants();
+        }
 
 private:
-
 
         int processSegments(const struct blkif_request_segment *segments,
 			    uint32_t nr_segments,
 			    blkif_sector_t sector_number,
 			    bool write);
-        int performRead(const blkif_request_t &req);
-        int performWrite(const blkif_request_t &req);
-        int handleIndirectRequest(const blkif_request_indirect_t *indirect);
+
+        int processSegment(const blkif_request_segment *const seg,
+			   const blkif_sector_t start_sector,
+			   const uint32_t nr_sectors,
+			   bool write);
+
+        int handleReadWrite(const blkif_request_t &req);
+        int handleIndirect(const blkif_request_indirect_t *indirect);
+
+        void freeGrants();
+        void evictGrants();
+        void *mapGrant(const grant_ref_t gref);
+        void *addGrant(const grant_ref_t gref);
+
 	// Override receiving requests
 	virtual void processRequest(const blkif_request& req) override;
 
 	// XenBackend::Log can be used by backend
 	XenBackend::Log mLog;
-  
+
         domid_t mDomId;
         std::shared_ptr<DiskImage> mImage{nullptr};
+        std::list<GntPage> mGntLru;
+        std::unordered_map<grant_ref_t, decltype(mGntLru)::iterator> mGntMap;
 };
 //! [BlkInRingBuffer]
 
@@ -85,18 +147,18 @@ private:
 class BlkFrontendHandler : public XenBackend::FrontendHandlerBase
 {
 public:
-  BlkFrontendHandler(const std::string& devName, 
-		     domid_t feDomId, 
+  BlkFrontendHandler(const std::string& devName,
+		     domid_t feDomId,
 		     uint16_t devId) : FrontendHandlerBase("FrontendHandler",
 							   "vbd",
-							   feDomId, 
+							   feDomId,
 							   devId),
 				       mLog("FrontendHandler")
   {
     LOG(mLog, DEBUG) << "Create blk frontend handler, dom id: "
 		     << feDomId;
   }
-  
+
 private:
 
 	// Override onBind method

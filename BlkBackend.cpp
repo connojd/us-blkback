@@ -23,164 +23,236 @@
 #include <cxxopts.hpp>
 
 #ifdef _WIN32
-
 #include <windows.h>
-
-static inline int
-set_affinity(uint64_t core)
-{
-    if (SetProcessAffinityMask(GetCurrentProcess(), 1ULL << core) == 0) {
-        return -1;
-    }
-
-    return 0;
-}
-
 #else
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-
 #include <sched.h>
-
-static inline int
-set_affinity(uint64_t core)
-{
-    cpu_set_t  mask;
-
-    CPU_ZERO(&mask);
-    CPU_SET(core, &mask);
-
-    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
-        return -1;
-    }
-
-    return 0;
-}
-
+#include <unistd.h>
 #endif
 
 using XenBackend::FrontendHandlerPtr;
 using XenBackend::RingBufferPtr;
 
-void dump_sector(const void *target, uint64_t sector_size)
+// Total number of (persistent) grants that may be mapped at any given time.
+// On Windows this must be less than the number of grants implied
+// by the size of the FDO hole. This hole currently is 64MB which
+// gives 64K grants available in total. A small (< 128) portion of
+// these are reserved for the shared info and grant table pages.
+// The rest are free to use here.
+constexpr uint64_t MAX_PGRANTS = 8192U;
+
+// Total number of frontends we can service. This is chosen to
+// keep the maximum number of persistent grants-per-frontend around 1000.
+constexpr uint64_t MAX_FRONTENDS = 8U;
+constexpr uint64_t MAX_PGRANTS_PER_FRONTEND = MAX_PGRANTS / MAX_FRONTENDS;
+
+constexpr uint64_t SECTORS_PER_PAGE = XC_PAGE_SIZE / SECTOR_SIZE;
+constexpr uint64_t SEGMENTS_PER_INDIRECT_PAGE =
+    XC_PAGE_SIZE / sizeof(struct blkif_request_segment);
+
+constexpr uint64_t MAX_INDIRECT_SEGMENTS = 256U;
+constexpr uint64_t MAX_INDIRECT_PAGES =
+    div_round_up(MAX_INDIRECT_SEGMENTS, SEGMENTS_PER_INDIRECT_PAGE);
+
+// Evict 5% of existing grants when the persistent limit is full
+constexpr uint64_t GRANT_EVICTION_SIZE =
+    div_round_up(MAX_PGRANTS_PER_FRONTEND * 5, 100);
+
+// Make sure segments-per-page is a positive power of two
+static_assert(SEGMENTS_PER_INDIRECT_PAGE > 0U);
+static_assert((SEGMENTS_PER_INDIRECT_PAGE & (SEGMENTS_PER_INDIRECT_PAGE - 1U)) == 0U);
+
+static_assert(MAX_INDIRECT_PAGES <= BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST);
+static_assert(MAX_PGRANTS_PER_FRONTEND > BLKIF_MAX_SEGMENTS_PER_REQUEST);
+static_assert(MAX_PGRANTS_PER_FRONTEND > GRANT_EVICTION_SIZE);
+
+static std::atomic<uint64_t> frontendCount;
+
+static bool validSegment(const blkif_request_segment *const seg) noexcept
 {
-    std::cerr << '\n';
-    for(uint64_t i = 0; i < sector_size; i++) {
-        if ( i % 16 == 0 )
-            std::cerr << '\n';
-        unsigned char *ptr = (unsigned char*)target;
-        std::cerr << std::hex << std::setfill('0') << std::setw(2) << (int)ptr[i] << " " << std::dec;
+    if (seg->gref == 0U) {
+        return false;
     }
-    std::cerr << '\n';
+
+    if (seg->first_sect >= SECTORS_PER_PAGE) {
+        return false;
+    }
+
+    if (seg->last_sect >= SECTORS_PER_PAGE) {
+        return false;
+    }
+
+    if (seg->first_sect > seg->last_sect) {
+        return false;
+    }
+
+    return true;
 }
 
-
-std::vector<grant_ref_t>
-gatherGrantRefs(const struct blkif_request_segment *segments, uint32_t nr_segments)
+void BlkCmdRingBuffer::evictGrants()
 {
-    std::vector<grant_ref_t> grefs;
-    
-    for (uint64_t i = 0; i < nr_segments; i++) {
-        grefs.push_back(segments[i].gref);
+    while (mGntLru.size() > (MAX_PGRANTS_PER_FRONTEND - GRANT_EVICTION_SIZE)) {
+        GntPage page = mGntLru.back();
+        page.unmap();
+        mGntMap.erase(page.gref());
+        mGntLru.pop_back();
     }
-
-    return grefs;
 }
 
-std::vector<grant_ref_t>
-gatherIndirectGrantRefs(const blkif_request_indirect_t *req)
+void BlkCmdRingBuffer::freeGrants()
 {
-    std::vector<grant_ref_t> grefs;
-
-    uint64_t page_count = std::ceil(req->nr_segments / (4096 / (1.0*sizeof(struct blkif_request_segment))));
-
-    for(uint64_t i = 0; i < page_count; i++) {
-        grefs.push_back(req->indirect_grefs[i]);
+    for (auto &page : mGntLru) {
+        page.unmap();
     }
 
-    return grefs;
+    mGntLru.clear();
+    mGntMap.clear();
 }
 
-
-int BlkCmdRingBuffer::processSegments(const struct blkif_request_segment *segments,
-                                      const uint32_t nr_segments,
-                                      const blkif_sector_t sector_number,
-                                      const bool write)
+void *BlkCmdRingBuffer::mapGrant(const grant_ref_t gref)
 {
-    constexpr uintptr_t sectors_per_page = XC_PAGE_SIZE / SECTOR_SIZE;
-    int rc = 0;
-    blkif_sector_t nr_sectors = 0;
-    std::vector<grant_ref_t> grefs = gatherGrantRefs(segments, nr_segments);
-    XenBackend::XenGnttabBuffer buffer(mDomId, grefs.data(), grefs.size());
+    GntPage page{gref};
 
-    for(uint64_t i = 0; i < nr_segments; i++) {
-        for(uint64_t sect_offset = segments[i].first_sect;
-            sect_offset <= segments[i].last_sect;
-            sect_offset++) {
+    if (!page.map(mDomId)) {
+        LOG(mLog, ERROR) << "Failed to map gref " << gref << '\n';
+        return nullptr;
+    }
 
-            blkif_sector_t target_sector = sector_number + nr_sectors;
-            uintptr_t byte_offset = (sect_offset + (i * sectors_per_page)) * SECTOR_SIZE;
-            char *target_buffer = (char *)((uintptr_t)buffer.get() + byte_offset);
+    void *virt = page.addr();
 
-            if(write) {
-                rc = mImage->writeSector(target_sector,
-                                         target_buffer,
-                                         SECTOR_SIZE);
-            } else {
-                rc = mImage->readSector(target_sector,
-                                        target_buffer,
-                                        SECTOR_SIZE);
-            }
+    mGntLru.push_front(page);
+    mGntMap.emplace(std::make_pair(gref, mGntLru.begin()));
 
-            nr_sectors++;
+    return virt;
+}
 
-            if(rc) {
+void *BlkCmdRingBuffer::addGrant(const grant_ref_t gref)
+{
+    auto map_itr = mGntMap.find(gref);
+
+    if (map_itr != mGntMap.end()) {
+        auto lru_itr = map_itr->second;
+        void *virt = lru_itr->addr();
+
+        // Move to the front of LRU list
+        mGntLru.push_front(*lru_itr);
+        mGntLru.erase(lru_itr);
+
+        // Ensure that gref points to the most-recently used node
+        // on the LRU list
+        map_itr->second = mGntLru.begin();
+
+        return virt;
+    }
+
+    if (mGntLru.size() == MAX_PGRANTS_PER_FRONTEND) {
+        this->evictGrants();
+    }
+
+    return this->mapGrant(gref);
+}
+
+int BlkCmdRingBuffer::processSegment(const blkif_request_segment *const seg,
+                                     const blkif_sector_t start_sector,
+                                     const uint32_t nr_sectors,
+                                     const bool write)
+{
+    auto buffer = reinterpret_cast<uint8_t *>(this->addGrant(seg->gref));
+
+    if (!buffer) {
+        LOG(mLog, ERROR) << "Failed to add grant with gref " << seg->gref;
+        return BLKIF_RSP_ERROR;
+    }
+
+    buffer += SECTOR_SIZE * seg->first_sect;
+
+    if (write) {
+        return mImage->writeSectors(start_sector, nr_sectors, buffer);
+    } else {
+        return mImage->readSectors(start_sector, nr_sectors, buffer);
+    }
+}
+
+int BlkCmdRingBuffer::handleReadWrite(const blkif_request_t &req)
+{
+    const bool write = req.operation == BLKIF_OP_WRITE;
+    const uint8_t nr_segs = req.nr_segments;
+    uint64_t start_sector = req.sector_number;
+
+    if (nr_segs == 0U || nr_segs > BLKIF_MAX_SEGMENTS_PER_REQUEST) {
+        return BLKIF_RSP_ERROR;
+    }
+
+    for (uint32_t i = 0U; i < nr_segs; i++) {
+        const blkif_request_segment *const seg = &req.seg[i];
+        const uint32_t nr_sectors = seg->last_sect - seg->first_sect + 1U;
+
+        const int rc = this->processSegment(seg, start_sector, nr_sectors, write);
+        if (rc != BLKIF_RSP_OKAY) {
+            return rc;
+        }
+
+        start_sector += nr_sectors;
+    }
+
+    return BLKIF_RSP_OKAY;
+}
+
+int BlkCmdRingBuffer::handleIndirect(const blkif_request_indirect_t *indirect)
+{
+    const uint16_t op = indirect->indirect_op;
+    const uint16_t total_segments = indirect->nr_segments;
+
+    if (op != BLKIF_OP_READ && op != BLKIF_OP_WRITE) {
+        LOG(mLog, ERROR) << "Indirect request has invalid op (" << op << ")";
+        return BLKIF_RSP_ERROR;
+    }
+
+    if (total_segments == 0U) {
+        LOG(mLog, ERROR) << "Indirect request has 0 segments";
+        return BLKIF_RSP_ERROR;
+    }
+
+    if (total_segments > MAX_INDIRECT_SEGMENTS) {
+        LOG(mLog, ERROR) << "Indirect request has too many segments ("
+                         << total_segments << ")";
+        return BLKIF_RSP_ERROR;
+    }
+
+    blkif_sector_t start_sector = indirect->sector_number;
+    uint64_t segments_done = 0U;
+    const bool write = (op == BLKIF_OP_WRITE);
+    const uint64_t nr_indirect_grefs = div_round_up(total_segments,
+                                                    SEGMENTS_PER_INDIRECT_PAGE);
+
+    for (uint64_t i = 0U; i < nr_indirect_grefs; i++) {
+        const grant_ref_t gref = indirect->indirect_grefs[i];
+        auto seg = reinterpret_cast<const blkif_request_segment *const>(this->addGrant(gref));
+
+        if (!seg) {
+            return BLKIF_RSP_ERROR;
+        }
+
+        // How many segments are on this indirect page?
+        const uint64_t nr_segs = minimum(total_segments - segments_done,
+                                         SEGMENTS_PER_INDIRECT_PAGE);
+
+        for (uint64_t n = 0U; n < nr_segs; n++) {
+            const uint32_t nr_sectors = seg[n].last_sect - seg[n].first_sect + 1U;
+            const int rc = this->processSegment(&seg[n],
+                                                start_sector,
+                                                nr_sectors,
+                                                write);
+            if (rc != BLKIF_RSP_OKAY) {
                 return rc;
             }
+
+            start_sector += nr_sectors;
         }
-    }
 
-    return rc;
-}
-
-int BlkCmdRingBuffer::performRead(const blkif_request_t &req)
-{
-    if(req.nr_segments == 0) {
-        return BLKIF_RSP_ERROR;
-    }
-    
-    int rc = processSegments(req.seg, req.nr_segments, req.sector_number, false);
-    if(rc) {
-        LOG(mLog, INFO) << "Read failed: " << req.sector_number;
-        return BLKIF_RSP_ERROR;
-    }
-
-    return BLKIF_RSP_OKAY;
-}
-
-int BlkCmdRingBuffer::performWrite(const blkif_request_t &req)
-{
-    int rc = processSegments(req.seg, req.nr_segments, req.sector_number, true);
-    if(rc) {
-        LOG(mLog, INFO) << "Write failed: " << req.sector_number;
-        return BLKIF_RSP_ERROR;
-    }
-
-    return BLKIF_RSP_OKAY;
-}
-
-int BlkCmdRingBuffer::handleIndirectRequest(const blkif_request_indirect_t *indirect)
-{
-    std::vector<grant_ref_t> grefs = gatherIndirectGrantRefs(indirect);
-    XenBackend::XenGnttabBuffer buffer(mDomId, grefs.data(), grefs.size());
-    struct blkif_request_segment *seg = (struct blkif_request_segment *)buffer.get();
-    int rc = processSegments(seg, indirect->nr_segments, indirect->sector_number, indirect->indirect_op == BLKIF_OP_WRITE);
-
-    if(rc) {
-        LOG(mLog, INFO) << "Indirect op failed: " << indirect->sector_number;
-        return BLKIF_RSP_ERROR;
+        segments_done += nr_segs;
     }
 
     return BLKIF_RSP_OKAY;
@@ -188,7 +260,6 @@ int BlkCmdRingBuffer::handleIndirectRequest(const blkif_request_indirect_t *indi
 
 static uint64_t cmd_count = 0;
 
-//! [processRequest]
 void BlkCmdRingBuffer::processRequest(const blkif_request& req)
 {
     blkif_response rsp;
@@ -197,54 +268,40 @@ void BlkCmdRingBuffer::processRequest(const blkif_request& req)
     rsp.id = req.id;
     rsp.operation = req.operation;
     rsp.status = BLKIF_RSP_OKAY;
-      
-    // process commands
-    switch(req.operation)
-    {
+
+    switch (req.operation) {
     case BLKIF_OP_READ:
-    {       
-        rsp.status = performRead(req);
-        break;
-    }
     case BLKIF_OP_WRITE:
-    {
-        rsp.status = performWrite(req);
+        rsp.status = this->handleReadWrite(req);
         break;
-    }
     case BLKIF_OP_WRITE_BARRIER:
     case BLKIF_OP_FLUSH_DISKCACHE:
-    {
         mImage->flushBackingFile();
         break;
-    }
     case BLKIF_OP_DISCARD:
     {
-        const blkif_request_discard_t *discard = reinterpret_cast<const blkif_request_discard_t *>(&req);
+        auto discard = reinterpret_cast<const blkif_request_discard_t *>(&req);
         rsp.status = mImage->discard(discard->sector_number, discard->nr_sectors);
         break;
     }
     case BLKIF_OP_INDIRECT:
     {
-        const blkif_request_indirect_t *indirect =
-            reinterpret_cast<const blkif_request_indirect_t *>(&req);
-        rsp.status = handleIndirectRequest(indirect);
+        auto indirect = reinterpret_cast<const blkif_request_indirect_t *>(&req);
+        rsp.status = this->handleIndirect(indirect);
         rsp.operation = indirect->indirect_op;
         break;
     }
-
     default:
-    {
-        LOG(mLog, INFO) << "Unimplemented blkif op: " << req.id << " cmd count: " << cmd_count;        
-        // set error status
+        LOG(mLog, INFO) << "Unimplemented blkif op: " << req.id << " cmd count: "
+                        << cmd_count;
+
         rsp.status = BLKIF_RSP_EOPNOTSUPP;
         break;
     }
-    }
 
-    // send response
     sendResponse(rsp);
 }
-//! [processRequest]
+
 
 //! [onBind]
 void BlkFrontendHandler::onBind()
@@ -256,7 +313,7 @@ void BlkFrontendHandler::onBind()
     uint32_t ref = getXenStore().readInt(getXsFrontendPath() + "/ring-ref");
 
     std::string path = getXenStore().readString(getXsBackendPath() + "/params");
-    LOG(mLog, INFO) << "open image file: " << path;
+    LOG(mLog, DEBUG) << "open image file: " << path;
 
     if (path.front() == '\'' && path.back() == '\'') {
         if (path.size() > 2) {
@@ -266,24 +323,24 @@ void BlkFrontendHandler::onBind()
 
     mImage = std::make_shared<DiskImage>(path);
 
-    if(!mImage) {
+    if (!mImage) {
         LOG(mLog, ERROR) << "Failed to open image file: " << path;
         throw;
     }
 
-    getXenStore().writeInt(getXsBackendPath() + "/feature-max-indirect-segments", 32);
+    getXenStore().writeInt(getXsBackendPath() + "/feature-max-indirect-segments", MAX_INDIRECT_SEGMENTS);
     getXenStore().writeInt(getXsBackendPath() + "/feature-discard", 0);
-    getXenStore().writeInt(getXsBackendPath() + "/feature-persistent", 0);
+    getXenStore().writeInt(getXsBackendPath() + "/feature-persistent", 1);
     getXenStore().writeInt(getXsBackendPath() + "/feature-flush-cache", 1);
     getXenStore().writeInt(getXsBackendPath() + "/feature-barrier", 1);
-	
+
     getXenStore().writeInt(getXsBackendPath() + "/sectors", mImage->getSectorCount());
     getXenStore().writeInt(getXsBackendPath() + "/sector-size", mImage->getSectorSize());
     getXenStore().writeInt(getXsBackendPath() + "/info", 0);
 
     // create command ring buffer
     mCmdRingBuffer.reset(new BlkCmdRingBuffer(getDomId(), port, ref, mImage));
-	  
+
     // add ring buffer
     addRingBuffer(mCmdRingBuffer);
 }
@@ -292,6 +349,8 @@ void BlkFrontendHandler::onBind()
 //! [onClosing]
 void BlkFrontendHandler::onClosing()
 {
+    LOG(mLog, DEBUG) << "onClosing called, freeing resources...";
+
     // free allocate on bind resources
     mCmdRingBuffer.reset();
 }
@@ -299,7 +358,14 @@ void BlkFrontendHandler::onClosing()
 //! [onNewFrontend]
 void BlkBackend::onNewFrontend(domid_t domId, uint16_t devId)
 {
-    LOG(mLog, INFO) << "New frontend, dom id: " << domId;
+    if (frontendCount >= MAX_FRONTENDS) {
+        LOG(mLog, ERROR) << "Unable to create new frontend (MAX_FRONTENDS="
+                         << MAX_FRONTENDS << ")\n";
+        return;
+    } else {
+        frontendCount++;
+        LOG(mLog, DEBUG) << "New frontend, dom id: " << domId;
+    }
 
     // create new blk frontend handler
     addFrontendHandler(FrontendHandlerPtr(new BlkFrontendHandler(getDeviceName(), domId, devId)));
@@ -322,6 +388,28 @@ void waitSignals()
 #else
     HANDLE h = CreateEvent(NULL, FALSE, FALSE, TEXT("STOPTHREAD"));
     WaitForSingleObject(h, INFINITE);
+#endif
+}
+
+static inline int set_affinity(uint64_t core)
+{
+#ifdef _WIN32
+    if (SetProcessAffinityMask(GetCurrentProcess(), 1ULL << core) == 0) {
+        return -1;
+    }
+
+    return 0;
+#else
+    cpu_set_t  mask;
+
+    CPU_ZERO(&mask);
+    CPU_SET(core, &mask);
+
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+        return -1;
+    }
+
+    return 0;
 #endif
 }
 
@@ -353,11 +441,26 @@ int main(int argc, char *argv[])
                                            << cpu;
                         throw;
                 }
+        } else {
+#ifdef _WIN32
+                SYSTEM_INFO info;
+                ZeroMemory(&info, sizeof(SYSTEM_INFO));
+                GetSystemInfo(&info);
+                auto nr_cpus = info.dwNumberOfProcessors;
+#else
+                auto nr_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+                if (set_affinity(nr_cpus - 1)) {
+                        LOG("Main", ERROR) << "Failed to set affinity to cpu "
+                                           << nr_cpus - 1;
+                        throw;
+                }
         }
 
         // Spin until XcOpen succeeds. Useful if this program may
         // be started before the xeniface driver is loaded.
         bool wait = args.count("wait") != 0;
+        frontendCount = 0;
 
         // Create backend
         BlkBackend blkBackend(wait);
