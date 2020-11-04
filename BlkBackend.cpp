@@ -18,6 +18,9 @@
  */
 
 #include "BlkBackend.hpp"
+#include "Args.hpp"
+#include "Service.hpp"
+
 #include <csignal>
 #include <cmath>
 #include <cxxopts.hpp>
@@ -373,7 +376,6 @@ void BlkBackend::onNewFrontend(domid_t domId, uint16_t devId)
 //! [onNewFrontend]
 
 void waitSignals()
-
 {
 #ifndef _WIN32
     sigset_t set;
@@ -418,21 +420,9 @@ int main(int argc, char *argv[])
 {
     try
     {
-        using namespace cxxopts;
+        frontendCount = 0;
 
-        cxxopts::Options options("us-blkback - xen blkback in userspace");
-
-        options.add_options()
-        ("h,help", "Print this help menu")
-        ("a,affinity", "Run on a specific cpu", cxxopts::value<uint64_t>(), "[cpu #]")
-        ("w,wait", "Wait for xeniface driver");
-
-        auto args = options.parse(argc, argv);
-        if (args.count("help")) {
-            std::cout << options.help() << '\n';
-            exit(EXIT_SUCCESS);
-        }
-
+        auto args = parseArgs(argc, argv);
         if (args.count("affinity")) {
                 uint64_t cpu = args["affinity"].as<uint64_t>();
 
@@ -457,10 +447,23 @@ int main(int argc, char *argv[])
                 }
         }
 
+#ifdef _WIN32
+        if (args.count("windows-svc")) {
+            if (copyArgs(argc, argv)) {
+                LOG("Main", ERROR) << "Failed to copy args for Windows service\n";
+                exit(EXIT_FAILURE);
+            }
+
+            serviceStart();
+            freeArgs();
+
+            exit(EXIT_SUCCESS);
+        }
+#endif
+
         // Spin until XcOpen succeeds. Useful if this program may
         // be started before the xeniface driver is loaded.
         bool wait = args.count("wait") != 0;
-        frontendCount = 0;
 
         // Create backend
         BlkBackend blkBackend(wait);

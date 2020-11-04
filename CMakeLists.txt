@@ -48,12 +48,12 @@ include_directories(${XENVBD_INCLUDE_PATH})
 ################################################################################
 # Sources
 ################################################################################
-#
-#
-set(BLKBACK_SOURCES
-  BlkBackend.cpp
-  DiskImage.cpp
-)
+
+if(WITH_WIN)
+    set(BLKBACK_SOURCES BlkBackend.cpp DiskImage.cpp Service.cpp)
+else()
+    set(BLKBACK_SOURCES BlkBackend.cpp DiskImage.cpp)
+endif()
 
 set(DISK_IMAGE_UTIL_SOURCES
   disk-image-util.cpp
