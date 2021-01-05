@@ -1,26 +1,25 @@
-variables:
-  PROJECT_NAMESPACE: gitlab.com/brendank310/us-blkback
-  PROJECT_NAME: win-blkback
-
 stages:
-  - qa-check
   - build
 
-build:
-  image:  registry.gitlab.com/brendank310/us-blkback
-  dependencies: []
-  stage: build
-#  before_script:
+variables:
+  CMAKE: 'C:\Program Files\CMake\bin\cmake'
 
+build:
+  stage: build
   script:
-    - mkdir build
+    - curl -Uri "https://gitlab.ainfosec.com/api/v4/projects/855/jobs/artifacts/venom/download?job=build-drivers&job_token=$CI_JOB_TOKEN" -UseBasicParsing -Outfile microv-artifacts.zip
+    - curl -Uri "https://gitlab.ainfosec.com/api/v4/projects/1435/jobs/artifacts/windows/download?job=build&job_token=$CI_JOB_TOKEN" -UseBasicParsing -Outfile libxenbe-artifacts.zip
+    - Expand-Archive -Force microv-artifacts.zip microv-artifacts
+    - Expand-Archive -Force libxenbe-artifacts.zip libxenbe-artifacts
+    - mkdir -Force build
     - cd build
-    - cmake ..
-    - make
+    - '& "$CMAKE" -DWITH_WIN=ON -DXEN_PUBLIC_INCLUDE_PATH="libxenbe-artifacts\build\src\global-include" -DLIBXENBE_INCLUDE_PATH="libxenbe-artifacts\include" -DLIBXENBE_LIB_PATH="libxenbe-artifacts\build\src\Release" -DXENIFACE_INCLUDE_PATH="microv-artifacts\drivers\winpv\xeniface\include" -DXENIFACE_LIB_PATH="microv-artifacts\drivers\winpv\xeniface\xeniface\x64" -G "Visual Studio 16 2019" -A x64 ..'
+    - '& $env:MSBUILD_PATH /p:Configuration=Release /p:Platform=x64 /p:TargetVersion=Windows10 us-blkback.sln'
+
   artifacts:
     paths:
-      - build/unit-test-log
-    expire_in: 60 day
+      - build\Release\us-blkback.exe
+    expire_in: 30 day
 
   tags:
-    - docker
+    - ais-windows
