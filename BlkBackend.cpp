@@ -459,7 +459,14 @@ int main(int argc, char *argv[])
 
             exit(EXIT_SUCCESS);
         }
+
+        if (args.count("high-priority")) {
+            if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
+                LOG("Main", INFO) << "Failed to set high priority\n";
+            }
+        }
 #endif
+
 
         // Spin until XcOpen succeeds. Useful if this program may
         // be started before the xeniface driver is loaded.
