@@ -50,6 +50,16 @@ struct GntPage {
         mGref{gref}
     { }
 
+    GntPage(GntPage &&other) :
+        mAddr{other.mAddr},
+        mGref{other.mGref}
+    { }
+
+    GntPage(const GntPage &other) :
+        mAddr{other.mAddr},
+        mGref{other.mGref}
+    { }
+
     void *map(const domid_t domid)
     {
         constexpr int prot = PROT_READ | PROT_WRITE;

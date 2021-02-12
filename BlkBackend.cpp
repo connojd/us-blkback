@@ -126,7 +126,13 @@ void *BlkCmdRingBuffer::mapGrant(const grant_ref_t gref)
     void *virt = page.addr();
 
     mGntLru.push_front(page);
-    mGntMap.emplace(std::make_pair(gref, mGntLru.begin()));
+    auto [_, inserted] = mGntMap.try_emplace(gref, mGntLru.begin());
+
+    if (!inserted) {
+        LOG(mLog, ERROR) << "Failed to emplace gref " << gref << '\n';
+        page.unmap();
+        return nullptr;
+    }
 
     return virt;
 }
