@@ -136,18 +136,8 @@ void *BlkCmdRingBuffer::addGrant(const grant_ref_t gref)
     auto map_itr = mGntMap.find(gref);
 
     if (map_itr != mGntMap.end()) {
-        auto lru_itr = map_itr->second;
-        void *virt = lru_itr->addr();
-
-        // Move to the front of LRU list
-        mGntLru.push_front(*lru_itr);
-        mGntLru.erase(lru_itr);
-
-        // Ensure that gref points to the most-recently used node
-        // on the LRU list
-        map_itr->second = mGntLru.begin();
-
-        return virt;
+        mGntLru.splice(mGntLru.begin(), mGntLru, map_itr->second);
+        return map_itr->second->addr();
     }
 
     if (mGntLru.size() == MAX_PGRANTS_PER_FRONTEND) {
