@@ -55,6 +55,7 @@ parseArgs(int argc, char *argv[])
 #ifdef _WIN32
         ("s,windows-svc", "Run as a windows service")
 #endif
+        ("p,high-priority", "Run with high priority")
         ("w,wait", "Wait for xeniface driver");
 
         auto args = options.parse(argc, argv);

@@ -126,7 +126,13 @@ void *BlkCmdRingBuffer::mapGrant(const grant_ref_t gref)
     void *virt = page.addr();
 
     mGntLru.push_front(page);
-    mGntMap.emplace(std::make_pair(gref, mGntLru.begin()));
+    auto [_, inserted] = mGntMap.try_emplace(gref, mGntLru.begin());
+
+    if (!inserted) {
+        LOG(mLog, ERROR) << "Failed to emplace gref " << gref << '\n';
+        page.unmap();
+        return nullptr;
+    }
 
     return virt;
 }
@@ -136,18 +142,8 @@ void *BlkCmdRingBuffer::addGrant(const grant_ref_t gref)
     auto map_itr = mGntMap.find(gref);
 
     if (map_itr != mGntMap.end()) {
-        auto lru_itr = map_itr->second;
-        void *virt = lru_itr->addr();
-
-        // Move to the front of LRU list
-        mGntLru.push_front(*lru_itr);
-        mGntLru.erase(lru_itr);
-
-        // Ensure that gref points to the most-recently used node
-        // on the LRU list
-        map_itr->second = mGntLru.begin();
-
-        return virt;
+        mGntLru.splice(mGntLru.begin(), mGntLru, map_itr->second);
+        return map_itr->second->addr();
     }
 
     if (mGntLru.size() == MAX_PGRANTS_PER_FRONTEND) {
@@ -459,7 +455,14 @@ int main(int argc, char *argv[])
 
             exit(EXIT_SUCCESS);
         }
+
+        if (args.count("high-priority")) {
+            if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
+                LOG("Main", INFO) << "Failed to set high priority\n";
+            }
+        }
 #endif
+
 
         // Spin until XcOpen succeeds. Useful if this program may
         // be started before the xeniface driver is loaded.

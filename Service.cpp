@@ -196,6 +196,12 @@ DWORD WINAPI blkback_worker(LPVOID param)
 
         log("%s: starting blkback\n", __func__);
 
+        if (args.count("high-priority")) {
+            if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
+                log("%s: Failed to set high priority\n", __func__);
+            }
+        }
+
         BlkBackend blkBackend(args.count("wait") != 0);
         blkBackend.start();
         service_wait_for_stop_signal();
